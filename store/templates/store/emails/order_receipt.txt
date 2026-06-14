@@ -1,0 +1,14 @@
+Hello {{ customer_name }},
+
+Thank you for your payment. Your order has been placed successfully.
+
+Order code: {{ order.code }}
+Total paid: {{ order.currency }} {{ order.total }}
+Delivery: {{ order.ship_city }}, {{ order.ship_region }}
+
+Your receipt is attached as a PDF.
+{% if receipt_url %}You can also view it online: {{ receipt_url }}{% endif %}
+
+Please keep this email and your order code for support.
+
+Kbee Computers

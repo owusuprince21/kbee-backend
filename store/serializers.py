@@ -745,3 +745,350 @@ class HotItemSerializer(serializers.ModelSerializer):
 #             "status", "amount", "currency",
 #             "raw", "paid_at", "completed_at", "created_at",
 #         )
+
+
+# =============================================================================
+# ACTIVE COMMERCE SERIALIZERS
+# =============================================================================
+
+from .models import (
+    AccountDetail,
+    Address,
+    Cart,
+    CartItem,
+    Customer,
+    Order,
+    OrderItem,
+    Payment,
+    Review,
+    ShippingRegion,
+    ShippingTown,
+    WishlistItem,
+)
+
+
+class CustomerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Customer
+        fields = ("id", "firebase_uid", "email", "full_name", "photo_url", "is_guest", "guest_key", "date_joined")
+        read_only_fields = ("id", "firebase_uid", "is_guest", "guest_key", "date_joined")
+
+
+class AddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Address
+        fields = (
+            "id",
+            "full_name",
+            "line1",
+            "line2",
+            "city",
+            "region",
+            "postal_code",
+            "country",
+            "phone",
+            "is_default",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "created_at", "updated_at")
+
+    def create(self, validated_data):
+        customer = self.context.get("customer")
+        if customer is not None:
+            return Address.objects.create(customer=customer, **validated_data)
+        return super().create(validated_data)
+
+
+class AccountDetailSerializer(serializers.ModelSerializer):
+    customer = CustomerSerializer(read_only=True)
+
+    class Meta:
+        model = AccountDetail
+        fields = ("id", "customer", "bio", "phone", "created_at", "updated_at")
+        read_only_fields = ("id", "customer", "created_at", "updated_at")
+
+
+class CustomerMeSerializer(serializers.ModelSerializer):
+    phone = serializers.CharField(required=False, allow_blank=True)
+    bio = serializers.CharField(required=False, allow_blank=True)
+
+    class Meta:
+        model = Customer
+        fields = (
+            "id",
+            "firebase_uid",
+            "email",
+            "full_name",
+            "photo_url",
+            "is_guest",
+            "phone",
+            "bio",
+            "date_joined",
+        )
+        read_only_fields = ("id", "firebase_uid", "is_guest", "date_joined")
+
+    def to_representation(self, instance: Customer) -> dict[str, Any]:
+        data = super().to_representation(instance)
+        acc = getattr(instance, "account", None)
+        data["phone"] = getattr(acc, "phone", "") or ""
+        data["bio"] = getattr(acc, "bio", "") or ""
+        return data
+
+    def update(self, instance: Customer, validated_data: dict[str, Any]) -> Customer:
+        phone = validated_data.pop("phone", None)
+        bio = validated_data.pop("bio", None)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+        acc, _ = AccountDetail.objects.get_or_create(customer=instance)
+        changed = False
+        if phone is not None and phone != acc.phone:
+            acc.phone = phone
+            changed = True
+        if bio is not None and bio != acc.bio:
+            acc.bio = bio
+            changed = True
+        if changed:
+            acc.save()
+        return instance
+
+
+class ProductMiniSerializer(serializers.ModelSerializer):
+    main_image_url = CloudinaryURLField(source="main_image", read_only=True)
+    images = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = (
+            "id",
+            "name",
+            "slug",
+            "price",
+            "discount_price",
+            "main_image_url",
+            "images",
+            "is_in_stock",
+            "stock_quantity",
+        )
+
+    def get_images(self, obj: Product) -> List[dict[str, Any]]:
+        imgs: List[dict[str, Any]] = []
+        u = _safe_url(getattr(obj, "main_image", None))
+        if u:
+            imgs.append({"id": 0, "image": u, "is_primary": True})
+        try:
+            for g in obj.gallery.all():
+                gu = _safe_url(getattr(g, "gallery_image", None))
+                if gu:
+                    imgs.append({"id": g.id, "image": gu, "is_primary": False})
+        except Exception:
+            pass
+        return imgs
+
+
+class CartItemSerializer(serializers.ModelSerializer):
+    product = ProductMiniSerializer(read_only=True)
+    product_id = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(),
+        write_only=True,
+        source="product",
+        required=False,
+    )
+    quantity = serializers.IntegerField(min_value=1, required=False, default=1)
+    subtotal = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CartItem
+        fields = ("id", "product", "product_id", "quantity", "unit_price", "added_at", "subtotal")
+        read_only_fields = ("unit_price", "added_at", "subtotal")
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and "product" in data and "product_id" not in data:
+            data = {**data, "product_id": data.get("product")}
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        if "product" not in attrs:
+            raise serializers.ValidationError({"product": "Provide product or product_id."})
+        return attrs
+
+    def get_subtotal(self, obj: CartItem) -> str:
+        return str(obj.subtotal())
+
+
+class CartSerializer(serializers.ModelSerializer):
+    items = CartItemSerializer(many=True, read_only=True)
+    subtotal = serializers.SerializerMethodField()
+    is_active = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Cart
+        fields = ("id", "customer", "created_at", "updated_at", "checked_out_at", "is_active", "items", "subtotal")
+        read_only_fields = ("customer", "created_at", "updated_at", "checked_out_at", "is_active", "subtotal")
+
+    def get_subtotal(self, obj: Cart) -> str:
+        return str(obj.subtotal())
+
+
+class WishlistItemSerializer(serializers.ModelSerializer):
+    product = ProductSerializer(read_only=True)
+    product_id = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(),
+        write_only=True,
+        source="product",
+        required=False,
+    )
+
+    class Meta:
+        model = WishlistItem
+        fields = ("id", "product", "product_id", "added_at")
+        read_only_fields = ("added_at",)
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and "product" in data and "product_id" not in data:
+            data = {**data, "product_id": data.get("product")}
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        if "product" not in attrs:
+            raise serializers.ValidationError({"product": "Provide product or product_id."})
+        return attrs
+
+
+class CustomerSlimSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Customer
+        fields = ("id", "full_name", "email", "photo_url", "firebase_uid", "is_guest")
+
+
+class ReviewSerializer(serializers.ModelSerializer):
+    customer = CustomerSlimSerializer(read_only=True)
+    customer_name = serializers.SerializerMethodField()
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_slug = serializers.CharField(source="product.slug", read_only=True)
+    product_image = serializers.SerializerMethodField()
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = Review
+        fields = (
+            "id",
+            "product",
+            "product_name",
+            "product_slug",
+            "product_image",
+            "customer",
+            "customer_name",
+            "rating",
+            "comment",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "customer",
+            "created_at",
+            "updated_at",
+            "customer_name",
+            "product_name",
+            "product_slug",
+            "product_image",
+        )
+
+    def get_customer_name(self, obj: Review) -> str:
+        return obj.customer.full_name or obj.customer.email or "Customer"
+
+    def get_product_image(self, obj: Review):
+        if obj.product.main_image:
+            return obj.product.main_image.url
+        image = obj.product.gallery.first()
+        return image.gallery_image.url if image and image.gallery_image else None
+
+
+class OrderItemSlimSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderItem
+        fields = ("id", "product", "product_name", "product_slug", "image_url", "quantity", "unit_price")
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSlimSerializer(many=True, read_only=True)
+    receipt_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = (
+            "id",
+            "code",
+            "status",
+            "currency",
+            "subtotal",
+            "shipping",
+            "payment_charge",
+            "total",
+            "ship_full_name",
+            "ship_phone",
+            "ship_line1",
+            "ship_line2",
+            "ship_city",
+            "ship_region",
+            "ship_postal",
+            "ship_country",
+            "notes",
+            "receipt_url",
+            "receipt_generated_at",
+            "created_at",
+            "updated_at",
+            "items",
+        )
+
+    def get_receipt_url(self, obj: Order) -> str:
+        from .receipts import order_receipt_url
+
+        if not getattr(obj, "receipt_image", None):
+            return ""
+        request = self.context.get("request")
+        return order_receipt_url(obj, request=request)
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Payment
+        fields = (
+            "id",
+            "provider",
+            "tx_ref",
+            "psk_id",
+            "channel",
+            "network",
+            "status",
+            "amount",
+            "currency",
+            "raw",
+            "paid_at",
+            "completed_at",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class ShippingRegionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShippingRegion
+        fields = ("id", "name", "slug", "position", "active")
+
+
+class ShippingTownSerializer(serializers.ModelSerializer):
+    region = ShippingRegionSerializer(read_only=True)
+    region_id = serializers.PrimaryKeyRelatedField(
+        queryset=ShippingRegion.objects.all(),
+        source="region",
+        write_only=True,
+        required=False,
+    )
+
+    class Meta:
+        model = ShippingTown
+        fields = ("id", "region", "region_id", "name", "slug", "fee", "active")

@@ -12,6 +12,7 @@ from django.core.validators import RegexValidator
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from cloudinary.models import CloudinaryField # type: ignore
+from cloudinary_storage.storage import RawMediaCloudinaryStorage
 
 
 # =============================================================================
@@ -589,3 +590,359 @@ class HotItem(models.Model):
 #         if raw_payload:
 #             self.raw = {**(self.raw or {}), **raw_payload}
 #         self.save(update_fields=["status", "raw", "updated_at"])
+
+
+# =============================================================================
+# ACTIVE COMMERCE MODELS
+# =============================================================================
+
+class Customer(models.Model):
+    firebase_uid = models.CharField(max_length=160, unique=True)
+    email = models.EmailField(blank=True)
+    full_name = models.CharField(max_length=150, blank=True)
+    photo_url = models.URLField(blank=True)
+    is_guest = models.BooleanField(default=False)
+    guest_key = models.CharField(max_length=160, unique=True, blank=True, null=True)
+    date_joined = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-date_joined"]
+        indexes = [models.Index(fields=["firebase_uid"]), models.Index(fields=["guest_key"])]
+
+    def __str__(self) -> str:
+        return self.full_name or self.email or self.firebase_uid
+
+
+class Cart(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="carts")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    checked_out_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        return f"Cart #{self.pk} for {self.customer}"
+
+    @property
+    def is_active(self) -> bool:
+        return self.checked_out_at is None
+
+    def subtotal(self) -> Decimal:
+        return sum((item.subtotal() for item in self.items.all()), Decimal("0.00"))
+
+
+class CartItem(models.Model):
+    cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="cart_items")
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [UniqueConstraint(fields=["cart", "product"], name="unique_product_per_cart")]
+        ordering = ["-added_at"]
+
+    def __str__(self) -> str:
+        return f"{self.quantity} x {self.product.name}"
+
+    def save(self, *args, **kwargs):
+        if self.unit_price is None:
+            self.unit_price = self.product.discount_price or self.product.price
+        super().save(*args, **kwargs)
+
+    def subtotal(self) -> Decimal:
+        return Decimal(self.unit_price or 0) * self.quantity
+
+
+class WishlistItem(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="wishlist_items")
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="wishlisted_by")
+    added_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-added_at"]
+        constraints = [UniqueConstraint(fields=["customer", "product"], name="unique_wishlist_per_customer_product")]
+
+    def __str__(self) -> str:
+        return f"{self.customer} wishlist {self.product.name}"
+
+
+def validate_rating(value):
+    rating = Decimal(str(value))
+    if not (Decimal("0.5") <= rating <= Decimal("5.0")):
+        from django.core.exceptions import ValidationError
+        raise ValidationError("Rating must be between 0.5 and 5.")
+    if (rating * Decimal("2")) % Decimal("1") != 0:
+        from django.core.exceptions import ValidationError
+        raise ValidationError("Rating must use half-star steps, like 3.5 or 4.0.")
+
+
+class Review(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="reviews")
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="reviews")
+    rating = models.DecimalField(max_digits=2, decimal_places=1, validators=[validate_rating])
+    comment = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [UniqueConstraint(fields=["product", "customer"], name="unique_review_per_customer_product")]
+
+    def __str__(self) -> str:
+        return f"Review {self.rating} by {self.customer} on {self.product.name}"
+
+
+class Address(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="addresses")
+    full_name = models.CharField(max_length=255, blank=True, null=True)
+    line1 = models.CharField("Address line 1", max_length=255)
+    line2 = models.CharField("Address line 2", max_length=255, blank=True, null=True)
+    city = models.CharField(max_length=100, blank=True, null=True)
+    region = models.CharField("Region / State", max_length=100, blank=True, null=True)
+    postal_code = models.CharField(max_length=20, blank=True, null=True)
+    country = models.CharField(max_length=60, blank=True, null=True, default="Ghana")
+    phone = models.CharField(
+        max_length=32,
+        blank=True,
+        null=True,
+        validators=[RegexValidator(r"^[\d+\-\s()]+$", "Invalid phone number.")],
+    )
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_default", "-created_at"]
+
+    def __str__(self) -> str:
+        who = self.full_name or self.customer.full_name or self.customer.email or "Recipient"
+        return f"{who}: {self.line1}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.is_default:
+            Address.objects.filter(customer=self.customer).exclude(pk=self.pk).update(is_default=False)
+
+
+class AccountDetail(models.Model):
+    customer = models.OneToOneField(Customer, on_delete=models.CASCADE, related_name="account")
+    bio = models.TextField(blank=True)
+    phone = models.CharField(
+        max_length=32,
+        blank=True,
+        validators=[RegexValidator(r"^[\d+\-\s()]+$", "Invalid phone number.")],
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Account detail"
+        verbose_name_plural = "Account details"
+
+    def __str__(self):
+        return f"Account for {self.customer}"
+
+
+@receiver(post_save, sender=Customer)
+def ensure_account_detail(sender, instance: Customer, created: bool, **kwargs):
+    if created:
+        AccountDetail.objects.get_or_create(customer=instance)
+
+
+class ShippingRegion(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(max_length=120, unique=True)
+    active = models.BooleanField(default=True)
+    position = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["position", "name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+
+class ShippingTown(models.Model):
+    region = models.ForeignKey(ShippingRegion, on_delete=models.CASCADE, related_name="towns")
+    name = models.CharField(max_length=120)
+    slug = models.SlugField(max_length=150)
+    fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["region__position", "region__name", "name"]
+        constraints = [UniqueConstraint(fields=["region", "slug"], name="unique_shipping_town_per_region")]
+
+    def __str__(self) -> str:
+        return f"{self.name}, {self.region.name}"
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+
+class CheckoutCharge(models.Model):
+    name = models.CharField(max_length=80, default="Paystack charge")
+    percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("1.98"))
+    active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Checkout charge"
+        verbose_name_plural = "Checkout charges"
+
+    def __str__(self) -> str:
+        state = "active" if self.active else "inactive"
+        return f"{self.name}: {self.percentage}% ({state})"
+
+    @classmethod
+    def current_percentage(cls) -> Decimal:
+        charge = cls.objects.filter(active=True).order_by("-updated_at", "-id").first()
+        return Decimal(charge.percentage) if charge else Decimal("1.98")
+
+
+class OrderStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    PAID = "paid", "Paid"
+    FAILED = "failed", "Failed"
+    CANCELLED = "cancelled", "Cancelled"
+    PACKAGED = "packaged", "Packaged"
+    SHIPPED = "shipped", "Shipped"
+    DELIVERED = "delivered", "Delivered"
+
+
+def _order_code() -> str:
+    return f"KB-{uuid.uuid4().hex[:8].upper()}"
+
+
+class Order(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name="orders")
+    ship_full_name = models.CharField(max_length=255, blank=True)
+    ship_line1 = models.CharField(max_length=255)
+    ship_line2 = models.CharField(max_length=255, blank=True)
+    ship_city = models.CharField(max_length=100, blank=True)
+    ship_region = models.CharField(max_length=100, blank=True)
+    ship_postal = models.CharField(max_length=20, blank=True)
+    ship_country = models.CharField(max_length=60, default="Ghana")
+    ship_phone = models.CharField(max_length=32, blank=True)
+    code = models.CharField(max_length=20, unique=True, default=_order_code, editable=False)
+    status = models.CharField(max_length=20, choices=OrderStatus.choices, default=OrderStatus.PENDING)
+    currency = models.CharField(max_length=8, default="GHS")
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    shipping = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payment_charge = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    notes = models.TextField(blank=True)
+    receipt_image = models.FileField(
+        upload_to="receipts/",
+        storage=RawMediaCloudinaryStorage(),
+        blank=True,
+        null=True,
+    )
+    receipt_generated_at = models.DateTimeField(blank=True, null=True)
+    receipt_emailed_at = models.DateTimeField(blank=True, null=True)
+    stock_deducted_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["code"]), models.Index(fields=["status", "-created_at"])]
+
+    def __str__(self):
+        return f"Order {self.code} ({self.status})"
+
+    def recalc_totals(self):
+        self.subtotal = sum((it.line_total() for it in self.items.all()), Decimal("0.00"))
+        self.total = (
+            (self.subtotal or Decimal("0.00"))
+            + (self.shipping or Decimal("0.00"))
+            + (self.payment_charge or Decimal("0.00"))
+        )
+
+
+class OrderItem(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="order_items")
+    product_name = models.CharField(max_length=200)
+    product_slug = models.SlugField(max_length=220, blank=True)
+    image_url = models.URLField(blank=True)
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.quantity} x {self.product_name}"
+
+    def line_total(self) -> Decimal:
+        return self.unit_price * self.quantity
+
+
+class MoMoNetwork(models.TextChoices):
+    MTN = "mtn", "MTN MoMo"
+    AIRTELTIGO = "airteltigo", "AirtelTigo Money"
+    TELECEL = "telecel", "Telecel"
+
+
+class PaymentStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    SUCCESSFUL = "successful", "Successful"
+    FAILED = "failed", "Failed"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class Payment(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.SET_NULL, related_name="payments", null=True, blank=True)
+    provider = models.CharField(max_length=20, default="paystack")
+    tx_ref = models.CharField(max_length=64, unique=True)
+    psk_id = models.CharField(max_length=120, blank=True, null=True)
+    channel = models.CharField(max_length=32, default="card")
+    network = models.CharField(max_length=20, choices=MoMoNetwork.choices, blank=True, default="")
+    status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PENDING)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=8, default="GHS")
+    raw = models.JSONField(default=dict, blank=True)
+    paid_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["tx_ref"]),
+            models.Index(fields=["provider", "psk_id"]),
+            models.Index(fields=["status", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.provider} {self.tx_ref} ({self.status})"
+
+    def mark_success(self, raw_payload: dict | None = None, paid_time: timezone.datetime | None = None):
+        self.status = PaymentStatus.SUCCESSFUL
+        self.paid_at = paid_time or timezone.now()
+        self.completed_at = self.paid_at
+        if raw_payload:
+            self.raw = {**(self.raw or {}), **raw_payload}
+            try:
+                self.psk_id = raw_payload.get("data", {}).get("id") or self.psk_id
+            except Exception:
+                pass
+        self.save(update_fields=["status", "paid_at", "completed_at", "raw", "psk_id", "updated_at"])
+
+    def mark_failed(self, raw_payload: dict | None = None):
+        self.status = PaymentStatus.FAILED
+        if raw_payload:
+            self.raw = {**(self.raw or {}), **raw_payload}
+        self.save(update_fields=["status", "raw", "updated_at"])

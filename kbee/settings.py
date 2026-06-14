@@ -3,17 +3,22 @@ import os
 from pathlib import Path
 from datetime import timedelta
 
+import certifi
 from decouple import config
 from django.core.exceptions import ImproperlyConfigured
 from corsheaders.defaults import default_headers, default_methods
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def env_bool(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 # -----------------------------------------------------------------------------
 # Core
 # -----------------------------------------------------------------------------
 SECRET_KEY = config("SECRET_KEY", default="django-insecure-change-this-in-production")
-DEBUG = config("DEBUG", default=True, cast=bool)
+DEBUG = config("DJANGO_DEBUG", default=config("DEBUG", default=True), cast=env_bool)
 
 ALLOWED_HOSTS = config(
     "ALLOWED_HOSTS",
@@ -144,6 +149,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-user-email",
     "x-user-name",
     "x-user-photo",
+    "x-guest-id",
 ]
 CORS_ALLOW_METHODS = list(default_methods)
 CORS_PREFLIGHT_MAX_AGE = 86400
@@ -190,18 +196,42 @@ SPECTACULAR_SETTINGS = {
 # -----------------------------------------------------------------------------
 # Payments (Optional / Future)
 # -----------------------------------------------------------------------------
-# PAYMENT_PROVIDER = "paystack"
-# PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
-# PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
-# PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="", cast=str)
-# PAYSTACK_CURRENCY = config("PAYSTACK_CURRENCY", default="GHS")
-# PAYSTACK_ALLOWED_NETWORKS = config(
-#     "PAYSTACK_ALLOWED_NETWORKS",
-#     default="mtn,airteltigo,telecel",
-#     cast=lambda v: [s.strip().lower() for s in v.split(",") if s.strip()],
-# )
-# SITE_BASE_URL = config("SITE_BASE_URL", default="http://127.0.0.1:8000")
-# FRONTEND_BASE_URL = config("FRONTEND_BASE_URL", default="http://127.0.0.1:3000")
+PAYMENT_PROVIDER = "paystack"
+PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
+PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
+PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="", cast=str)
+PAYSTACK_CURRENCY = config("PAYSTACK_CURRENCY", default="GHS")
+PAYSTACK_ALLOWED_NETWORKS = config(
+    "PAYSTACK_ALLOWED_NETWORKS",
+    default="mtn,airteltigo,telecel",
+    cast=lambda v: [s.strip().lower() for s in v.split(",") if s.strip()],
+)
+SITE_BASE_URL = config("SITE_BASE_URL", default="http://127.0.0.1:8000")
+FRONTEND_BASE_URL = config("FRONTEND_BASE_URL", default="http://localhost:3000")
+PAYSTACK_CALLBACK_URL = config("PAYSTACK_CALLBACK_URL", default=f"{FRONTEND_BASE_URL}/checkout/success")
+
+# -----------------------------------------------------------------------------
+# Email
+# -----------------------------------------------------------------------------
+EMAIL_BACKEND = config(
+    "EMAIL_BACKEND",
+    default=(
+        "django.core.mail.backends.smtp.EmailBackend"
+        if config("EMAIL_HOST", default="")
+        else "django.core.mail.backends.console.EmailBackend"
+    ),
+)
+EMAIL_CA_BUNDLE = config("EMAIL_CA_BUNDLE", default=certifi.where())
+os.environ.setdefault("SSL_CERT_FILE", EMAIL_CA_BUNDLE)
+os.environ.setdefault("REQUESTS_CA_BUNDLE", EMAIL_CA_BUNDLE)
+EMAIL_HOST = config("EMAIL_HOST", default="")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=env_bool)
+EMAIL_USE_SSL = config("EMAIL_USE_SSL", default=False, cast=env_bool)
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="Kbee Computers <no-reply@kbee.local>")
+SEND_ORDER_RECEIPT_EMAIL = config("SEND_ORDER_RECEIPT_EMAIL", default=False, cast=env_bool)
 
 # -----------------------------------------------------------------------------
 # JAZZMIN SETTINGS
@@ -216,8 +246,7 @@ JAZZMIN_SETTINGS = {
     "welcome_sign": "Welcome to Kbee Computers Admin",
     "copyright": "Kbee Computers",
 
-    # ✅ Only include models you actually keep active in admin.py
-    # (You commented out Order/Customer/etc in admin, so remove them here too)
+    # Include models that are active in store/admin.py.
     "search_model": [
         "auth.User",
         "auth.Group",
@@ -226,8 +255,11 @@ JAZZMIN_SETTINGS = {
         "store.HeroItem",
         "store.CountdownDeal",
         "store.HotItem",
-        # "store.Order",
-        # "store.Customer",
+        "store.ShippingRegion",
+        "store.ShippingTown",
+        "store.Customer",
+        "store.Order",
+        "store.Payment",
     ],
 
     "user_avatar": None,
@@ -242,7 +274,7 @@ JAZZMIN_SETTINGS = {
     "hide_apps": [],
     "hide_models": [],
 
-    # ✅ Keep ordering aligned with the models you’re using now
+    # Keep ordering aligned with the models registered in admin.py.
     "order_with_respect_to": [
         "store", "auth",
         "store.product",
@@ -251,25 +283,25 @@ JAZZMIN_SETTINGS = {
         "store.heroitem",
         "store.countdowndeal",
         "store.hotitem",
-
-        # ❌ Old checkout flow (future)
-        # "store.order",
-        # "store.payment",
-        # "store.customer",
-        # "store.address",
-        # "store.accountdetail",
-        # "store.cart",
-        # "store.cartitem",
-        # "store.wishlistitem",
-        # "store.review",
-        # "store.orderitem",
+        "store.shippingregion",
+        "store.shippingtown",
+        "store.checkoutcharge",
+        "store.customer",
+        "store.address",
+        "store.accountdetail",
+        "store.cart",
+        "store.cartitem",
+        "store.wishlistitem",
+        "store.review",
+        "store.order",
+        "store.payment",
     ],
 
     "custom_links": {
         "store": [
             {
                 "name": "Open Frontend",
-                "url": "http://127.0.0.1:3000",
+                "url": "http://localhost:3000",
                 "icon": "fas fa-external-link-alt",
                 "new_window": True,
             }
@@ -289,18 +321,19 @@ JAZZMIN_SETTINGS = {
         "store.heroitem": "fas fa-bullhorn",
         "store.countdowndeal": "fas fa-hourglass-half",
         "store.hotitem": "fas fa-fire",
-
-        # ❌ Future (checkout flow)
-        # "store.customer": "fas fa-user-check",
-        # "store.address": "fas fa-map-marker-alt",
-        # "store.accountdetail": "fas fa-id-card",
-        # "store.cart": "fas fa-shopping-cart",
-        # "store.cartitem": "fas fa-shopping-basket",
-        # "store.wishlistitem": "fas fa-heart",
-        # "store.review": "fas fa-star",
-        # "store.order": "fas fa-file-invoice",
-        # "store.orderitem": "fas fa-list-ol",
-        # "store.payment": "fas fa-money-check-alt",
+        "store.shippingregion": "fas fa-map-marked-alt",
+        "store.shippingtown": "fas fa-map-marker-alt",
+        "store.checkoutcharge": "fas fa-percentage",
+        "store.customer": "fas fa-user-check",
+        "store.address": "fas fa-address-book",
+        "store.accountdetail": "fas fa-id-card",
+        "store.cart": "fas fa-shopping-cart",
+        "store.cartitem": "fas fa-shopping-basket",
+        "store.wishlistitem": "fas fa-heart",
+        "store.review": "fas fa-star",
+        "store.order": "fas fa-file-invoice",
+        "store.orderitem": "fas fa-list-ol",
+        "store.payment": "fas fa-money-check-alt",
     },
 
     "default_icon_parents": "fas fa-chevron-circle-right",
