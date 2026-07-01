@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import timedelta
 
 import certifi
+import dj_database_url
 from decouple import config
 from django.core.exceptions import ImproperlyConfigured
 from corsheaders.defaults import default_headers, default_methods
@@ -19,12 +20,16 @@ def env_bool(value):
 # -----------------------------------------------------------------------------
 SECRET_KEY = config("SECRET_KEY", default="django-insecure-change-this-in-production")
 DEBUG = config("DJANGO_DEBUG", default=config("DEBUG", default=True), cast=env_bool)
+IS_PRODUCTION = not DEBUG
 
 ALLOWED_HOSTS = config(
     "ALLOWED_HOSTS",
     default="localhost,127.0.0.1",
-    cast=lambda v: [h.strip() for h in v.split(",")],
+    cast=lambda v: [h.strip() for h in v.split(",") if h.strip()],
 )
+
+if IS_PRODUCTION and SECRET_KEY == "django-insecure-change-this-in-production":
+    raise ImproperlyConfigured("SECRET_KEY must be set in production.")
 
 # -----------------------------------------------------------------------------
 # Cloudinary
@@ -53,7 +58,10 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
 
     # Third-party
+    "axes",
     "corsheaders",
+    "django_otp",
+    "django_otp.plugins.otp_totp",
     "rest_framework",
     "django_filters",
     "drf_spectacular",
@@ -67,12 +75,20 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",  # keep high, before CommonMiddleware
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "axes.middleware.AxesMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django_otp.middleware.OTPMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+
+AUTHENTICATION_BACKENDS = [
+    "axes.backends.AxesStandaloneBackend",
+    "django.contrib.auth.backends.ModelBackend",
 ]
 
 ROOT_URLCONF = "kbee.urls"
@@ -80,7 +96,7 @@ ROOT_URLCONF = "kbee.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -98,14 +114,32 @@ WSGI_APPLICATION = "kbee.wsgi.application"
 # -----------------------------------------------------------------------------
 # Database
 # -----------------------------------------------------------------------------
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+DATABASE_URL = config("DATABASE_URL", default="")
+if DATABASE_URL:
+    DATABASES = {
+        "default": dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=600,
+            conn_health_checks=True,
+            ssl_require=IS_PRODUCTION,
+        )
     }
-}
+else:
+    if IS_PRODUCTION:
+        raise ImproperlyConfigured("DATABASE_URL must be set in production.")
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
-AUTH_PASSWORD_VALIDATORS = []
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
@@ -122,8 +156,8 @@ STORAGES = {
     "default": {  # media
         "BACKEND": "cloudinary_storage.storage.MediaCloudinaryStorage",
     },
-    "staticfiles": {  # static
-        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
     },
 }
 
@@ -136,12 +170,12 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
     default="http://localhost:3000,http://127.0.0.1:3000",
-    cast=lambda v: [s.strip() for s in v.split(",")],
+    cast=lambda v: [s.strip() for s in v.split(",") if s.strip()],
 )
 CSRF_TRUSTED_ORIGINS = config(
     "CSRF_TRUSTED_ORIGINS",
     default="http://localhost:3000,http://127.0.0.1:3000",
-    cast=lambda v: [s.strip() for s in v.split(",")],
+    cast=lambda v: [s.strip() for s in v.split(",") if s.strip()],
 )
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
@@ -158,10 +192,26 @@ CORS_PREFLIGHT_MAX_AGE = 86400
 # DRF / Filters / Schema
 # -----------------------------------------------------------------------------
 REST_FRAMEWORK = {
-    # ✅ For the current “catalog + banners” APIs, AllowAny is fine.
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.AllowAny",
     ],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "kbee.auth.firebase.FirebaseHeaderAuthentication",
+    ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": config("DRF_THROTTLE_ANON", default="120/min"),
+        "user": config("DRF_THROTTLE_USER", default="300/min"),
+        "catalog": config("DRF_THROTTLE_CATALOG", default="240/min"),
+        "write": config("DRF_THROTTLE_WRITE", default="30/min"),
+        "checkout": config("DRF_THROTTLE_CHECKOUT", default="10/min"),
+        "payment": config("DRF_THROTTLE_PAYMENT", default="8/min"),
+        "webhook": config("DRF_THROTTLE_WEBHOOK", default="120/min"),
+    },
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
@@ -171,19 +221,16 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
 
-    # ❌ Auth classes (Customer/Cart/Orders flow) — keep for later, but disabled now
-    # If you keep these enabled while Customer is commented in models.py,
-    # you can still run into confusion/unused config.
-    # "DEFAULT_AUTHENTICATION_CLASSES": [
-    #     "rest_framework_simplejwt.authentication.JWTAuthentication",
-    #     "kbee.auth.firebase.FirebaseHeaderAuthentication",
-    # ],
 }
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Kbee Computers API",
     "VERSION": "1.0.0",
 }
+ENABLE_API_DOCS = DEBUG or config("ENABLE_API_DOCS", default=False, cast=env_bool)
+ALLOW_DEBUG_AUTH_HEADERS = config("ALLOW_DEBUG_AUTH_HEADERS", default=DEBUG, cast=env_bool)
+if not ENABLE_API_DOCS:
+    SILENCED_SYSTEM_CHECKS = ["drf_spectacular.W001", "drf_spectacular.W002"]
 
 # -----------------------------------------------------------------------------
 # JWT (Optional / Future)
@@ -209,6 +256,33 @@ PAYSTACK_ALLOWED_NETWORKS = config(
 SITE_BASE_URL = config("SITE_BASE_URL", default="http://127.0.0.1:8000")
 FRONTEND_BASE_URL = config("FRONTEND_BASE_URL", default="http://localhost:3000")
 PAYSTACK_CALLBACK_URL = config("PAYSTACK_CALLBACK_URL", default=f"{FRONTEND_BASE_URL}/checkout/success")
+ENABLE_LEGACY_CHECKOUT = config("ENABLE_LEGACY_CHECKOUT", default=False, cast=env_bool)
+
+# -----------------------------------------------------------------------------
+# Production security
+# -----------------------------------------------------------------------------
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = config("SECURE_SSL_REDIRECT", default=IS_PRODUCTION, cast=env_bool)
+SESSION_COOKIE_SECURE = config("SESSION_COOKIE_SECURE", default=IS_PRODUCTION, cast=env_bool)
+CSRF_COOKIE_SECURE = config("CSRF_COOKIE_SECURE", default=IS_PRODUCTION, cast=env_bool)
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = False
+SESSION_COOKIE_SAMESITE = config("SESSION_COOKIE_SAMESITE", default="Lax")
+CSRF_COOKIE_SAMESITE = config("CSRF_COOKIE_SAMESITE", default="Lax")
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+SECURE_HSTS_SECONDS = config("SECURE_HSTS_SECONDS", default=31536000 if IS_PRODUCTION else 0, cast=int)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = config("SECURE_HSTS_INCLUDE_SUBDOMAINS", default=IS_PRODUCTION, cast=env_bool)
+SECURE_HSTS_PRELOAD = config("SECURE_HSTS_PRELOAD", default=IS_PRODUCTION, cast=env_bool)
+
+AXES_FAILURE_LIMIT = config("AXES_FAILURE_LIMIT", default=5, cast=int)
+AXES_COOLOFF_TIME = config("AXES_COOLOFF_TIME", default=1, cast=int)
+AXES_LOCKOUT_PARAMETERS = [["username", "ip_address"]]
+AXES_RESET_ON_SUCCESS = True
+
+OTP_TOTP_ISSUER = config("OTP_TOTP_ISSUER", default="Kbee Admin")
 
 # -----------------------------------------------------------------------------
 # Email
@@ -249,15 +323,6 @@ JAZZMIN_SETTINGS = {
     # Include models that are active in store/admin.py.
     "search_model": [
         "auth.User",
-        "auth.Group",
-        "store.Product",
-        "store.Category",
-        "store.HeroItem",
-        "store.CountdownDeal",
-        "store.HotItem",
-        "store.ShippingRegion",
-        "store.ShippingTown",
-        "store.Customer",
         "store.Order",
         "store.Payment",
     ],

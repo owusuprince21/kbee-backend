@@ -770,8 +770,8 @@ from .models import (
 class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
-        fields = ("id", "firebase_uid", "email", "full_name", "photo_url", "is_guest", "guest_key", "date_joined")
-        read_only_fields = ("id", "firebase_uid", "is_guest", "guest_key", "date_joined")
+        fields = ("id", "email", "full_name", "photo_url", "date_joined")
+        read_only_fields = ("id", "email", "photo_url", "date_joined")
 
 
 class AddressSerializer(serializers.ModelSerializer):
@@ -799,6 +799,13 @@ class AddressSerializer(serializers.ModelSerializer):
             return Address.objects.create(customer=customer, **validated_data)
         return super().create(validated_data)
 
+    def validate(self, attrs):
+        text_fields = ("full_name", "line1", "line2", "city", "region", "postal_code", "country", "phone")
+        for field in text_fields:
+            if field in attrs and attrs[field] is not None:
+                attrs[field] = str(attrs[field]).strip()
+        return attrs
+
 
 class AccountDetailSerializer(serializers.ModelSerializer):
     customer = CustomerSerializer(read_only=True)
@@ -808,25 +815,29 @@ class AccountDetailSerializer(serializers.ModelSerializer):
         fields = ("id", "customer", "bio", "phone", "created_at", "updated_at")
         read_only_fields = ("id", "customer", "created_at", "updated_at")
 
+    def validate_bio(self, value):
+        value = (value or "").strip()
+        if len(value) > 500:
+            raise serializers.ValidationError("Bio must be 500 characters or fewer.")
+        return value
+
 
 class CustomerMeSerializer(serializers.ModelSerializer):
-    phone = serializers.CharField(required=False, allow_blank=True)
-    bio = serializers.CharField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True, max_length=32)
+    bio = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
     class Meta:
         model = Customer
         fields = (
             "id",
-            "firebase_uid",
             "email",
             "full_name",
             "photo_url",
-            "is_guest",
             "phone",
             "bio",
             "date_joined",
         )
-        read_only_fields = ("id", "firebase_uid", "is_guest", "date_joined")
+        read_only_fields = ("id", "email", "photo_url", "date_joined")
 
     def to_representation(self, instance: Customer) -> dict[str, Any]:
         data = super().to_representation(instance)
@@ -839,7 +850,7 @@ class CustomerMeSerializer(serializers.ModelSerializer):
         phone = validated_data.pop("phone", None)
         bio = validated_data.pop("bio", None)
         for field, value in validated_data.items():
-            setattr(instance, field, value)
+            setattr(instance, field, str(value).strip() if isinstance(value, str) else value)
         instance.save()
         acc, _ = AccountDetail.objects.get_or_create(customer=instance)
         changed = False
@@ -895,7 +906,7 @@ class CartItemSerializer(serializers.ModelSerializer):
         source="product",
         required=False,
     )
-    quantity = serializers.IntegerField(min_value=1, required=False, default=1)
+    quantity = serializers.IntegerField(min_value=1, max_value=20, required=False, default=1)
     subtotal = serializers.SerializerMethodField()
 
     class Meta:
@@ -959,7 +970,7 @@ class WishlistItemSerializer(serializers.ModelSerializer):
 class CustomerSlimSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
-        fields = ("id", "full_name", "email", "photo_url", "firebase_uid", "is_guest")
+        fields = ("id", "full_name", "photo_url", "is_guest")
 
 
 class ReviewSerializer(serializers.ModelSerializer):
@@ -987,6 +998,14 @@ class ReviewSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
+    def validate_comment(self, value):
+        value = (value or "").strip()
+        if len(value) < 3:
+            raise serializers.ValidationError("Comment must be at least 3 characters.")
+        if len(value) > 1000:
+            raise serializers.ValidationError("Comment must be 1000 characters or fewer.")
+        return value
         read_only_fields = (
             "customer",
             "created_at",

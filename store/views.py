@@ -14,7 +14,8 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
+from kbee.auth.firebase import customer_from_verified_claims
 
 import django_filters
 from django_filters.rest_framework import DjangoFilterBackend  # type: ignore
@@ -98,6 +99,7 @@ class CategoryViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CategorySerializer
     permission_classes = [AllowAny]
     lookup_field = "slug"
+    throttle_scope = "catalog"
 
 
 class ProductFilter(django_filters.FilterSet):
@@ -137,6 +139,7 @@ class ProductViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = ProductFilter
     search_fields = ["name"]
     ordering_fields = ["created_at", "updated_at", "price", "discount_price", "name"]
+    throttle_scope = "catalog"
 
     @action(detail=False, methods=["get"])
     def featured(self, request):
@@ -175,13 +178,14 @@ class ProductViewSet(viewsets.ReadOnlyModelViewSet):
 
 # --- Hero & Countdown -------------------------------------------------------
 
-class HeroItemViewSet(viewsets.ModelViewSet):
+class HeroItemViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = HeroItem.objects.select_related("product").order_by("position")
     serializer_class = HeroItemSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "catalog"
 
 
-class CountdownDealViewSet(viewsets.ModelViewSet):
+class CountdownDealViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = (
         CountdownDeal.objects
         .select_related("product")
@@ -190,6 +194,7 @@ class CountdownDealViewSet(viewsets.ModelViewSet):
     )
     serializer_class = CountdownDealSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "catalog"
 
     @action(detail=False, methods=["get"], url_path="active")
     def active(self, request):
@@ -205,7 +210,7 @@ class CountdownDealViewSet(viewsets.ModelViewSet):
 
 # --- Hot Items / Banners ----------------------------------------------------
 
-class HotItemViewSet(viewsets.ModelViewSet):
+class HotItemViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Read/write HotItem banners. 'active' returns only currently visible items
     (active=True and within optional starts_at/ends_at window), ordered by
@@ -219,6 +224,7 @@ class HotItemViewSet(viewsets.ModelViewSet):
     )
     serializer_class = HotItemSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "catalog"
 
     @action(detail=False, methods=["get"], url_path="active")
     def active(self, request):
@@ -240,42 +246,58 @@ class HotItemViewSet(viewsets.ModelViewSet):
 # ACTIVE COMMERCE VIEWSETS
 # =============================================================================
 
-def get_or_create_customer(request) -> Customer:
-    uid = request.headers.get("X-Firebase-UID") or ""
-    body_email = ""
-    try:
-        body_email = request.data.get("email", "") if hasattr(request, "data") else ""
-    except Exception:
-        body_email = ""
-    email = request.headers.get("X-User-Email", "") or body_email
-    full_name = request.headers.get("X-User-Name", "") or ""
-    photo = request.headers.get("X-User-Photo", "") or ""
+CUSTOMER_SESSION_KEY = "customer_id"
 
-    if uid:
-        customer, _ = Customer.objects.get_or_create(
-            firebase_uid=uid,
-            defaults={
-                "email": email or "",
-                "full_name": full_name,
-                "photo_url": photo,
-                "is_guest": False,
-            },
-        )
-        changed: list[str] = []
-        for field, value in (("email", email), ("full_name", full_name), ("photo_url", photo)):
-            if value and getattr(customer, field) != value:
-                setattr(customer, field, value)
-                changed.append(field)
-        if customer.is_guest:
-            customer.is_guest = False
-            changed.append("is_guest")
-        if changed:
-            customer.save(update_fields=changed)
+
+def customer_from_session(request) -> Customer | None:
+    customer_id = request.session.get(CUSTOMER_SESSION_KEY)
+    if not customer_id:
+        return None
+    return Customer.objects.filter(pk=customer_id, is_guest=False).first()
+
+
+def remember_customer_session(request, customer: Customer) -> None:
+    if customer.is_guest:
+        return
+    request.session[CUSTOMER_SESSION_KEY] = customer.pk
+    request.session.modified = True
+
+
+def request_has_firebase_auth_material(request) -> bool:
+    authorization = request.headers.get("Authorization") or ""
+    return authorization.startswith("Bearer ") or bool(request.headers.get("X-Firebase-UID"))
+
+
+def get_or_create_customer(request) -> Customer:
+    try:
+        customer = customer_from_verified_claims(request)
+    except AuthenticationFailed as exc:
+        if request_has_firebase_auth_material(request):
+            raise exc
+        customer = None
+    if not customer and request_has_firebase_auth_material(request):
+        raise AuthenticationFailed("Firebase authentication is required for this request.")
+    if customer:
+        remember_customer_session(request, customer)
         guest_key = request.headers.get("X-Guest-ID") or ""
         if guest_key:
             merge_guest_customer_into_customer(guest_key, customer)
         return customer
 
+    customer = customer_from_session(request)
+    if customer:
+        guest_key = request.headers.get("X-Guest-ID") or ""
+        if guest_key:
+            merge_guest_customer_into_customer(guest_key, customer)
+        return customer
+
+    body_email = ""
+    try:
+        body_email = request.data.get("email", "") if hasattr(request, "data") else ""
+    except Exception:
+        body_email = ""
+    email = body_email
+    full_name = ""
     guest_key = request.headers.get("X-Guest-ID") or ""
     if not guest_key:
         if not request.session.session_key:
@@ -346,6 +368,22 @@ def merge_guest_customer_into_customer(guest_key: str, customer: Customer) -> No
     if not guest:
         return
 
+    Order.objects.filter(customer=guest).update(customer=customer)
+    Address.objects.filter(customer=guest).update(customer=customer)
+
+    guest_account = getattr(guest, "account", None)
+    customer_account, _ = AccountDetail.objects.get_or_create(customer=customer)
+    account_changed = []
+    if guest_account:
+        if guest_account.phone and not customer_account.phone:
+            customer_account.phone = guest_account.phone
+            account_changed.append("phone")
+        if guest_account.bio and not customer_account.bio:
+            customer_account.bio = guest_account.bio
+            account_changed.append("bio")
+    if account_changed:
+        customer_account.save(update_fields=account_changed)
+
     guest_cart = Cart.objects.filter(customer=guest, checked_out_at=None).prefetch_related("items__product").first()
     if guest_cart and guest_cart.items.exists():
         target_cart = get_active_cart(customer)
@@ -371,6 +409,14 @@ def merge_guest_customer_into_customer(guest_key: str, customer: Customer) -> No
         WishlistItem.objects.get_or_create(customer=customer, product=guest_wishlist.product)
     WishlistItem.objects.filter(customer=guest).delete()
 
+    for guest_review in Review.objects.filter(customer=guest).select_related("product"):
+        existing_review = Review.objects.filter(customer=customer, product=guest_review.product).first()
+        if existing_review:
+            guest_review.delete()
+        else:
+            guest_review.customer = customer
+            guest_review.save(update_fields=["customer", "updated_at"])
+
 
 def fresh_cart_data(cart: Cart) -> dict:
     fresh = (
@@ -390,7 +436,9 @@ def validate_product_stock(product: Product, quantity: int) -> None:
 
 
 class CartViewSet(viewsets.ViewSet):
+    serializer_class = CartSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "write"
 
     def list(self, request):
         customer = get_or_create_customer(request)
@@ -444,8 +492,11 @@ class CartViewSet(viewsets.ViewSet):
 class WishlistViewSet(viewsets.ModelViewSet):
     serializer_class = WishlistItemSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "write"
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return WishlistItem.objects.none()
         customer = get_or_create_customer(self.request)
         return WishlistItem.objects.filter(customer=customer).select_related("product", "product__category")
 
@@ -468,6 +519,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_fields = ["product"]
     ordering_fields = ["created_at", "rating"]
+    throttle_scope = "write"
 
     def get_queryset(self):
         return Review.objects.select_related("customer", "product").all()
@@ -524,8 +576,11 @@ class ReviewViewSet(viewsets.ModelViewSet):
 class AddressViewSet(viewsets.ModelViewSet):
     serializer_class = AddressSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "write"
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Address.objects.none()
         customer = get_or_create_customer(self.request)
         return Address.objects.filter(customer=customer)
 
@@ -535,7 +590,9 @@ class AddressViewSet(viewsets.ModelViewSet):
 
 
 class AccountDetailViewSet(viewsets.ViewSet):
+    serializer_class = AccountDetailSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "write"
 
     def list(self, request):
         customer = get_or_create_customer(request)
@@ -546,8 +603,11 @@ class AccountDetailViewSet(viewsets.ViewSet):
 class CustomerViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CustomerSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "write"
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Customer.objects.none()
         customer = get_or_create_customer(self.request)
         return Customer.objects.filter(pk=customer.pk)
 
@@ -561,14 +621,40 @@ class CustomerViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(serializer.data)
         return Response(CustomerMeSerializer(customer).data)
 
+    @action(detail=False, methods=["get"], url_path="session")
+    def session(self, request):
+        customer = customer_from_session(request)
+        if not customer:
+            raise PermissionDenied("No active customer session.")
+        return Response(CustomerMeSerializer(customer).data)
+
+    @action(detail=False, methods=["post"], url_path="logout")
+    def logout(self, request):
+        request.session.flush()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = OrderSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "write"
+    lookup_value_regex = r"[^/]+"
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Order.objects.none()
         customer = get_or_create_customer(self.request)
-        return Order.objects.filter(customer=customer).prefetch_related("items")
+        return Order.objects.filter(customer=customer).prefetch_related("items", "items__product")
+
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup = self.kwargs.get(self.lookup_url_kwarg or self.lookup_field)
+        if lookup and str(lookup).isdigit():
+            obj = get_object_or_404(queryset, pk=lookup)
+        else:
+            obj = get_object_or_404(queryset, code__iexact=lookup)
+        self.check_object_permissions(self.request, obj)
+        return obj
 
 
 class ShippingRegionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -576,12 +662,14 @@ class ShippingRegionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ShippingRegionSerializer
     permission_classes = [AllowAny]
     lookup_field = "slug"
+    throttle_scope = "catalog"
 
 
 class ShippingTownViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ShippingTownSerializer
     permission_classes = [AllowAny]
     lookup_field = "slug"
+    throttle_scope = "catalog"
 
     def get_queryset(self):
         qs = ShippingTown.objects.filter(active=True, region__active=True).select_related("region")

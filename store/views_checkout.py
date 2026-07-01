@@ -427,9 +427,15 @@ class CheckoutView(APIView):
     use the initialize-from-cart flows below.
     """
     permission_classes = [AllowAny]
+    throttle_scope = "checkout"
 
     @transaction.atomic
     def post(self, request):
+        if not getattr(settings, "ENABLE_LEGACY_CHECKOUT", False):
+            return Response(
+                {"detail": "Direct checkout is disabled. Use payment initialization endpoints."},
+                status=410,
+            )
         customer = get_or_create_customer(request)
 
         cart = Cart.objects.filter(customer=customer, checked_out_at=None).first()
@@ -599,6 +605,7 @@ class InitializeCheckoutFromCartView(APIView):
     Checkout exposes both card and mobile money channels on Paystack.
     """
     permission_classes = [AllowAny]
+    throttle_scope = "payment"
 
     def post(self, request):
         preferred_channel = (request.data.get("preferred_channel") or "checkout").strip() or "checkout"
@@ -628,6 +635,7 @@ class InitializeMoMoFromCartView(APIView):
       }
     """
     permission_classes = [AllowAny]
+    throttle_scope = "payment"
 
     def post(self, request):
         return _initialize_hosted_checkout_from_cart(request, preferred_channel="mobile_money")
@@ -787,6 +795,7 @@ class InitializeCardFromCartView(APIView):
     is the Paystack hosted checkout URL to redirect the customer to.
     """
     permission_classes = [AllowAny]
+    throttle_scope = "payment"
 
     def post(self, request):
         return _initialize_hosted_checkout_from_cart(request, preferred_channel="card")
@@ -912,6 +921,7 @@ class VerifyPaymentView(APIView):
     On success: creates Order from cart (if missing), links Payment, marks as paid.
     """
     permission_classes = [AllowAny]
+    throttle_scope = "payment"
 
     @transaction.atomic
     def get(self, request, tx_ref: str):
@@ -943,10 +953,14 @@ class VerifyPaymentView(APIView):
         d = (data.get("data") or {})
         pay_status = (d.get("status") or "").lower()  # 'success' when paid
         currency = (d.get("currency") or "GHS").upper()
-        # amount returned is in pesewas; convert to GHS (not strictly needed here)
-        # amount = _money(Decimal(d.get("amount") or 0) / Decimal(100))
+        amount = _money(Decimal(d.get("amount") or 0) / Decimal(100))
 
         if ok and pay_status == "success" and currency == "GHS":
+            if amount != _money(payment.amount):
+                log.warning("Payment amount mismatch for %s: expected %s got %s", tx_ref, payment.amount, amount)
+                payment.mark_failed({"verify": data, "amount_mismatch": {"expected": str(payment.amount), "got": str(amount)}})
+                return Response({"detail": "Payment amount mismatch."}, status=400)
+
             md = (d.get("metadata") or {})
             init = (payment.raw or {}).get("init", {})
             owner_customer_id = _payment_customer_id(payment, md)
@@ -1028,6 +1042,7 @@ class PaystackWebhookView(APIView):
     On success: creates Order from cart (if missing), links Payment, marks as paid.
     """
     permission_classes = [AllowAny]  # signature validation is our auth
+    throttle_scope = "webhook"
 
     @transaction.atomic
     def post(self, request):
@@ -1043,7 +1058,7 @@ class PaystackWebhookView(APIView):
             hashlib.sha512,
         ).hexdigest()
 
-        if not signature or signature != computed:
+        if not signature or not hmac.compare_digest(signature, computed):
             log.warning("Invalid Paystack webhook signature.")
             return Response(status=401)
 
@@ -1083,6 +1098,16 @@ class PaystackWebhookView(APIView):
 
         # Handle success
         if status_val == "success" and currency == "GHS":
+            if amount != _money(payment.amount):
+                log.warning(
+                    "Webhook payment amount mismatch for %s: expected %s got %s",
+                    reference,
+                    payment.amount,
+                    amount,
+                )
+                payment.mark_failed({"webhook": payload, "amount_mismatch": {"expected": str(payment.amount), "got": str(amount)}})
+                return Response({"detail": "ok"}, status=200)
+
             # Create order from cart if missing (use metadata customer/address)
             if not payment.order:
                 init = _payment_init(payment)
@@ -1132,6 +1157,7 @@ class PaystackWebhookView(APIView):
 
 class OrderReceiptView(APIView):
     permission_classes = [AllowAny]
+    throttle_scope = "write"
 
     def get(self, request, code: str, download: bool = False):
         order = Order.objects.filter(code=code).select_related("customer").first()
