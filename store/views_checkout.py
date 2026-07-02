@@ -18,6 +18,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import ValidationError, PermissionDenied
 
+from kbee.auth.firebase import customer_from_verified_claims
+
 from .models import (
     Cart,
     Customer,
@@ -32,7 +34,11 @@ from .models import (
     ShippingTown,
 )
 from .serializers import CartSerializer  # optional snapshot/debug
-from .views import get_or_create_customer, merge_guest_customer_into_customer  # reuse helpers from views.py
+from .views import (
+    customer_from_session,
+    get_or_create_customer,
+    merge_guest_customer_into_customer,
+)  # reuse helpers from views.py
 from .receipts import build_order_receipt_pdf, generate_order_receipt, order_receipt_url, send_order_receipt_email
 
 log = logging.getLogger(__name__)
@@ -203,6 +209,20 @@ def _claim_guest_payment_for_registered_customer(
         payment.save(update_fields=["raw", "updated_at"])
 
     return request_customer
+
+
+def _registered_customer_from_request(request) -> Customer | None:
+    try:
+        customer = customer_from_verified_claims(request)
+    except Exception:
+        customer = None
+    if customer and not customer.is_guest:
+        return customer
+
+    session_customer = customer_from_session(request)
+    if session_customer and not session_customer.is_guest:
+        return session_customer
+    return None
 
 
 def _stock_error(product: Product, requested: int) -> str:
@@ -969,8 +989,6 @@ class VerifyPaymentView(APIView):
         if not PS_SECRET:
             raise ValidationError("Payment is not configured. Missing PAYSTACK_SECRET_KEY in settings.")
 
-        customer = get_or_create_customer(request)
-
         # Find payment by our tx_ref (we used tx_ref as Paystack reference)
         payment = (
             Payment.objects.select_for_update()
@@ -1007,10 +1025,14 @@ class VerifyPaymentView(APIView):
             owner_customer_id = _payment_customer_id(payment, md)
             owner_customer = Customer.objects.filter(pk=owner_customer_id).first() if owner_customer_id else None
             if not owner_customer:
-                owner_customer = payment.order.customer if payment.order else customer
-            owner_customer = _claim_guest_payment_for_registered_customer(payment, owner_customer, customer)
+                owner_customer = payment.order.customer if payment.order else None
+            request_customer = _registered_customer_from_request(request)
+            if owner_customer and request_customer:
+                owner_customer = _claim_guest_payment_for_registered_customer(payment, owner_customer, request_customer)
             if payment.order:
                 payment.order.refresh_from_db()
+            if not owner_customer:
+                return Response({"detail": "Payment owner missing."}, status=400)
 
             # Ownership check after we know the original payment owner. Guest callbacks can
             # arrive on a different localhost/127.0.0.1 origin, so request customer may differ.
