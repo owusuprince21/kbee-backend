@@ -32,7 +32,7 @@ from .models import (
     ShippingTown,
 )
 from .serializers import CartSerializer  # optional snapshot/debug
-from .views import get_or_create_customer  # reuse the helper from views.py
+from .views import get_or_create_customer, merge_guest_customer_into_customer  # reuse helpers from views.py
 from .receipts import build_order_receipt_pdf, generate_order_receipt, order_receipt_url, send_order_receipt_email
 
 log = logging.getLogger(__name__)
@@ -164,6 +164,45 @@ def _payment_customer_id(payment: Payment, metadata: dict | None = None):
     init = _payment_init(payment)
     snapshot = _payment_cart_snapshot(payment)
     return metadata.get("customer_id") or init.get("customer_id") or snapshot.get("customer")
+
+
+def _checkout_email(request, customer: Customer) -> str:
+    email = (request.data.get("email") or customer.email or f"user-{customer.id}@example.invalid").strip()
+    if customer.is_guest and email and not email.endswith("@example.invalid") and customer.email != email:
+        customer.email = email
+        customer.save(update_fields=["email"])
+    return email
+
+
+def _same_email(left: str | None, right: str | None) -> bool:
+    return bool(left and right and left.strip().lower() == right.strip().lower())
+
+
+def _claim_guest_payment_for_registered_customer(
+    payment: Payment,
+    owner_customer: Customer,
+    request_customer: Customer,
+) -> Customer:
+    if not owner_customer.is_guest or request_customer.is_guest:
+        return owner_customer
+    if not _same_email(owner_customer.email, request_customer.email):
+        return owner_customer
+
+    if owner_customer.guest_key:
+        merge_guest_customer_into_customer(owner_customer.guest_key, request_customer)
+    elif payment.order and payment.order.customer_id == owner_customer.id:
+        payment.order.customer = request_customer
+        payment.order.save(update_fields=["customer", "updated_at"])
+
+    raw = payment.raw if isinstance(payment.raw, dict) else {}
+    init = raw.get("init") if isinstance(raw.get("init"), dict) else {}
+    if init.get("customer_id") != request_customer.id:
+        init["customer_id"] = request_customer.id
+        raw["init"] = init
+        payment.raw = raw
+        payment.save(update_fields=["raw", "updated_at"])
+
+    return request_customer
 
 
 def _stock_error(product: Product, requested: int) -> str:
@@ -495,10 +534,7 @@ def _initialize_hosted_checkout_from_cart(request, preferred_channel: str = "che
 
     shipping_fee, shipping_town = _resolve_shipping(request, customer, addr)
     currency = (request.data.get("currency") or "GHS").upper()
-    email = (request.data.get("email") or customer.email or f"user-{customer.id}@example.invalid").strip()
-    if customer.is_guest and email and not email.endswith("@example.invalid") and customer.email != email:
-        customer.email = email
-        customer.save(update_fields=["email"])
+    email = _checkout_email(request, customer)
 
     cart = Cart.objects.filter(customer=customer, checked_out_at=None).first()
     if not cart or cart.items.count() == 0:
@@ -671,6 +707,7 @@ class InitializeMoMoFromCartView(APIView):
 
         shipping_fee, shipping_town = _resolve_shipping(request, customer, addr)
         currency = (request.data.get("currency") or "GHS").upper()
+        email = _checkout_email(request, customer)
 
         # compute total from active cart (do not mutate cart here)
         cart = Cart.objects.filter(customer=customer, checked_out_at=None).first()
@@ -700,6 +737,7 @@ class InitializeMoMoFromCartView(APIView):
             channel="mobile_money",
             raw={
                 "init": {
+                    "customer_id": customer.id,
                     "address_id": address_id,
                     "note": request.data.get("note") or "",
                     "shipping_fee": str(shipping_fee),
@@ -713,7 +751,7 @@ class InitializeMoMoFromCartView(APIView):
         )
 
         payload = {
-            "email": customer.email or f"user-{customer.id}@example.invalid",
+            "email": email,
             "amount": _to_pesewas(total),   # pesewas
             "currency": "GHS",
             "reference": tx_ref,
@@ -970,6 +1008,9 @@ class VerifyPaymentView(APIView):
             owner_customer = Customer.objects.filter(pk=owner_customer_id).first() if owner_customer_id else None
             if not owner_customer:
                 owner_customer = payment.order.customer if payment.order else customer
+            owner_customer = _claim_guest_payment_for_registered_customer(payment, owner_customer, customer)
+            if payment.order:
+                payment.order.refresh_from_db()
 
             # Ownership check after we know the original payment owner. Guest callbacks can
             # arrive on a different localhost/127.0.0.1 origin, so request customer may differ.
