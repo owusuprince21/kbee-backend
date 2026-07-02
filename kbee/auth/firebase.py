@@ -91,6 +91,60 @@ def _debug_claims_from_headers(request) -> Optional[dict]:
     }
 
 
+def _claim_email_is_verified(claims: dict) -> bool:
+    if claims.get("email_verified") is True:
+        return True
+    firebase_claims = claims.get("firebase") or {}
+    provider = firebase_claims.get("sign_in_provider") or ""
+    return bool(claims.get("email") and provider == "google.com")
+
+
+def _merge_guest_records_by_verified_email(email: str, customer: Customer) -> None:
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return
+
+    from store.models import AccountDetail, Address, Cart, Order, Review, WishlistItem
+
+    guests = list(
+        Customer.objects
+        .filter(is_guest=True, email__iexact=normalized_email)
+        .exclude(pk=customer.pk)
+    )
+    if not guests:
+        return
+
+    customer_account, _ = AccountDetail.objects.get_or_create(customer=customer)
+    for guest in guests:
+        Order.objects.filter(customer=guest).update(customer=customer)
+        Address.objects.filter(customer=guest).update(customer=customer)
+        Cart.objects.filter(customer=guest).update(customer=customer)
+
+        guest_account = getattr(guest, "account", None)
+        account_changed = []
+        if guest_account:
+            if guest_account.phone and not customer_account.phone:
+                customer_account.phone = guest_account.phone
+                account_changed.append("phone")
+            if guest_account.bio and not customer_account.bio:
+                customer_account.bio = guest_account.bio
+                account_changed.append("bio")
+        if account_changed:
+            customer_account.save(update_fields=account_changed)
+
+        for guest_wishlist in WishlistItem.objects.filter(customer=guest).select_related("product"):
+            WishlistItem.objects.get_or_create(customer=customer, product=guest_wishlist.product)
+        WishlistItem.objects.filter(customer=guest).delete()
+
+        for guest_review in Review.objects.filter(customer=guest).select_related("product"):
+            existing_review = Review.objects.filter(customer=customer, product=guest_review.product).first()
+            if existing_review:
+                guest_review.delete()
+            else:
+                guest_review.customer = customer
+                guest_review.save(update_fields=["customer", "updated_at"])
+
+
 def customer_from_verified_claims(request) -> Optional[Customer]:
     claims = verified_firebase_claims(request)
     if not claims:
@@ -124,6 +178,9 @@ def customer_from_verified_claims(request) -> Optional[Customer]:
         changed.append("is_guest")
     if changed:
         cust.save(update_fields=changed)
+
+    if email and _claim_email_is_verified(claims):
+        _merge_guest_records_by_verified_email(email, cust)
 
     return cust
 

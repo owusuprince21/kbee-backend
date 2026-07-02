@@ -35,6 +35,14 @@ services:
         value: "False"
       - key: SECURE_SSL_REDIRECT
         value: "True"
+      - key: SESSION_COOKIE_SECURE
+        value: "True"
+      - key: CSRF_COOKIE_SECURE
+        value: "True"
+      - key: SESSION_COOKIE_SAMESITE
+        value: "None"
+      - key: CSRF_COOKIE_SAMESITE
+        value: "None"
 
 databases:
   - name: kbee-postgres

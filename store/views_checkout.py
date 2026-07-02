@@ -496,6 +496,9 @@ def _initialize_hosted_checkout_from_cart(request, preferred_channel: str = "che
     shipping_fee, shipping_town = _resolve_shipping(request, customer, addr)
     currency = (request.data.get("currency") or "GHS").upper()
     email = (request.data.get("email") or customer.email or f"user-{customer.id}@example.invalid").strip()
+    if customer.is_guest and email and not email.endswith("@example.invalid") and customer.email != email:
+        customer.email = email
+        customer.save(update_fields=["email"])
 
     cart = Cart.objects.filter(customer=customer, checked_out_at=None).first()
     if not cart or cart.items.count() == 0:
