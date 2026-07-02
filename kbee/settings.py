@@ -73,7 +73,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",  # keep high, before CommonMiddleware
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "axes.middleware.AxesMiddleware",
@@ -188,6 +188,22 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 CORS_ALLOW_METHODS = list(default_methods)
 CORS_PREFLIGHT_MAX_AGE = 86400
 
+# Firebase Admin credentials are read lazily by kbee.authentication when the
+# first Firebase bearer token is verified. Accept the common env var names so
+# local and deployed environments can use the same service-account JSON.
+FIREBASE_CREDENTIALS = config(
+    "FIREBASE_CREDENTIALS",
+    default=config("FIREBASE_SERVICE_ACCOUNT_JSON", default=config("FIREBASE_CONFIG", default="")),
+)
+FIREBASE_CREDENTIALS_FILE = config(
+    "FIREBASE_CREDENTIALS_FILE",
+    default=config("GOOGLE_APPLICATION_CREDENTIALS", default=""),
+)
+if FIREBASE_CREDENTIALS:
+    os.environ.setdefault("FIREBASE_CREDENTIALS", FIREBASE_CREDENTIALS)
+if FIREBASE_CREDENTIALS_FILE:
+    os.environ.setdefault("FIREBASE_CREDENTIALS_FILE", FIREBASE_CREDENTIALS_FILE)
+
 # -----------------------------------------------------------------------------
 # DRF / Filters / Schema
 # -----------------------------------------------------------------------------
@@ -196,7 +212,7 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.AllowAny",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "kbee.auth.firebase.FirebaseHeaderAuthentication",
+        "kbee.authentication.FirebaseAuthentication",
     ],
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
@@ -208,6 +224,8 @@ REST_FRAMEWORK = {
         "user": config("DRF_THROTTLE_USER", default="300/min"),
         "catalog": config("DRF_THROTTLE_CATALOG", default="240/min"),
         "write": config("DRF_THROTTLE_WRITE", default="30/min"),
+        "cart": config("DRF_THROTTLE_CART", default="180/min"),
+        "reviews": config("DRF_THROTTLE_REVIEWS", default="120/min"),
         "checkout": config("DRF_THROTTLE_CHECKOUT", default="10/min"),
         "payment": config("DRF_THROTTLE_PAYMENT", default="8/min"),
         "webhook": config("DRF_THROTTLE_WEBHOOK", default="120/min"),

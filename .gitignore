@@ -16,6 +16,9 @@ env/
 .env.example
 .env.local
 .env.*.local
+.secrets/
+*.firebase-adminsdk*.json
+*serviceAccountKey*.json
 
 # Django
 *.log

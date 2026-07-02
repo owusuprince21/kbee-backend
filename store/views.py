@@ -438,7 +438,7 @@ def validate_product_stock(product: Product, quantity: int) -> None:
 class CartViewSet(viewsets.ViewSet):
     serializer_class = CartSerializer
     permission_classes = [AllowAny]
-    throttle_scope = "write"
+    throttle_scope = "cart"
 
     def list(self, request):
         customer = get_or_create_customer(request)
@@ -519,7 +519,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_fields = ["product"]
     ordering_fields = ["created_at", "rating"]
-    throttle_scope = "write"
+    throttle_scope = "reviews"
 
     def get_queryset(self):
         return Review.objects.select_related("customer", "product").all()
