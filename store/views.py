@@ -345,6 +345,24 @@ def get_registered_customer(request) -> Customer:
     raise PermissionDenied("Sign in is required for this request.")
 
 
+def claim_guest_orders_from_header(request, customer: Customer) -> None:
+    if customer.is_guest:
+        return
+    raw_codes = request.headers.get("X-Claim-Order-Codes") or ""
+    codes = {
+        code.strip().upper()
+        for code in raw_codes.split(",")
+        if code.strip()
+    }
+    if not codes:
+        return
+
+    Order.objects.filter(
+        code__in=codes,
+        customer__is_guest=True,
+    ).update(customer=customer, updated_at=timezone.now())
+
+
 def get_active_cart(customer: Customer) -> Cart:
     carts = list(
         Cart.objects
@@ -662,6 +680,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
         if getattr(self, "swagger_fake_view", False):
             return Order.objects.none()
         customer = get_registered_customer(self.request)
+        claim_guest_orders_from_header(self.request, customer)
         return Order.objects.filter(customer=customer).prefetch_related("items", "items__product")
 
     def get_object(self):
