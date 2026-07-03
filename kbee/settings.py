@@ -385,7 +385,7 @@ JAZZMIN_SETTINGS = {
         "store": [
             {
                 "name": "Open Frontend",
-                "url": "http://localhost:3000",
+                "url": "https://kbeecomputersgh.com/",
                 "icon": "fas fa-external-link-alt",
                 "new_window": True,
             }
