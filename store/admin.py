@@ -209,6 +209,9 @@ class CustomerAdmin(admin.ModelAdmin):
     inlines = [AccountDetailInline, AddressInline]
     ordering = ("-date_joined",)
 
+    def get_queryset(self, request):
+        return super().get_queryset(request).filter(is_guest=False)
+
     @admin.display(description="Name / Email", ordering="full_name")
     def full_name_or_email(self, obj: Customer):
         return obj.full_name or obj.email or ("Guest customer" if obj.is_guest else obj.firebase_uid)
