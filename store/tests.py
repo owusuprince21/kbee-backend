@@ -185,3 +185,13 @@ class FirebaseCustomerMergeTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.customer_id, registered.id)
         self.assertEqual(response.data["results"][0]["code"], order.code)
+
+
+class GuestReadTests(TestCase):
+    def test_cart_read_does_not_create_guest_customer(self):
+        response = APIClient().get("/api/cart/", HTTP_X_GUEST_ID="guest-browser-only")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["items"], [])
+        self.assertEqual(response.data["subtotal"], "0.00")
+        self.assertFalse(Customer.objects.filter(is_guest=True).exists())

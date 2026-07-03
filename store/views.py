@@ -256,6 +256,44 @@ def customer_from_session(request) -> Customer | None:
     return Customer.objects.filter(pk=customer_id, is_guest=False).first()
 
 
+def customer_from_guest_key(request) -> Customer | None:
+    guest_key = request.headers.get("X-Guest-ID") or ""
+    if not guest_key:
+        return None
+    return Customer.objects.filter(guest_key=guest_key, is_guest=True).first()
+
+
+def get_existing_customer(request) -> Customer | None:
+    try:
+        customer = customer_from_verified_claims(request)
+    except AuthenticationFailed as exc:
+        if request_has_firebase_auth_material(request):
+            raise exc
+        customer = None
+    if customer:
+        remember_customer_session(request, customer)
+        return customer
+
+    customer = customer_from_session(request)
+    if customer:
+        return customer
+
+    return customer_from_guest_key(request)
+
+
+def empty_cart_data() -> dict:
+    return {
+        "id": 0,
+        "customer": None,
+        "created_at": None,
+        "updated_at": None,
+        "checked_out_at": None,
+        "is_active": True,
+        "items": [],
+        "subtotal": "0.00",
+    }
+
+
 def remember_customer_session(request, customer: Customer) -> None:
     if customer.is_guest:
         return
@@ -490,7 +528,9 @@ class CartViewSet(viewsets.ViewSet):
     throttle_scope = "cart"
 
     def list(self, request):
-        customer = get_or_create_customer(request)
+        customer = get_existing_customer(request)
+        if not customer:
+            return Response(empty_cart_data())
         cart = get_active_cart(customer)
         return Response(CartSerializer(cart).data)
 
@@ -546,7 +586,9 @@ class WishlistViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return WishlistItem.objects.none()
-        customer = get_or_create_customer(self.request)
+        customer = get_existing_customer(self.request)
+        if not customer:
+            return WishlistItem.objects.none()
         return WishlistItem.objects.filter(customer=customer).select_related("product", "product__category")
 
     def perform_create(self, serializer):
@@ -557,7 +599,9 @@ class WishlistViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["delete"], url_path=r"by-product/(?P<product_id>\d+)")
     def remove_by_product(self, request, product_id=None):
-        customer = get_or_create_customer(request)
+        customer = get_existing_customer(request)
+        if not customer:
+            return Response(status=status.HTTP_204_NO_CONTENT)
         WishlistItem.objects.filter(customer=customer, product_id=product_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -609,13 +653,13 @@ class ReviewViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def eligibility(self, request):
-        customer = get_or_create_customer(request)
         product_id = request.query_params.get("product")
         product = get_object_or_404(Product, pk=product_id)
-        review = Review.objects.filter(customer=customer, product=product).first()
+        customer = get_existing_customer(request)
+        review = Review.objects.filter(customer=customer, product=product).first() if customer else None
         return Response(
             {
-                "can_review": self.customer_can_review(customer, product),
+                "can_review": self.customer_can_review(customer, product) if customer else False,
                 "has_review": bool(review),
                 "review_id": review.id if review else None,
             }
@@ -630,7 +674,9 @@ class AddressViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return Address.objects.none()
-        customer = get_or_create_customer(self.request)
+        customer = get_existing_customer(self.request)
+        if not customer:
+            return Address.objects.none()
         return Address.objects.filter(customer=customer)
 
     def perform_create(self, serializer):
