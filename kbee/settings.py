@@ -184,6 +184,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-user-name",
     "x-user-photo",
     "x-guest-id",
+    "x-claim-order-codes",
 ]
 CORS_ALLOW_METHODS = list(default_methods)
 CORS_PREFLIGHT_MAX_AGE = 86400

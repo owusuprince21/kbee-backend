@@ -348,17 +348,26 @@ def get_registered_customer(request) -> Customer:
 def claim_guest_orders_from_header(request, customer: Customer) -> None:
     if customer.is_guest:
         return
+
+    claim_filter = Q()
+
     raw_codes = request.headers.get("X-Claim-Order-Codes") or ""
     codes = {
         code.strip().upper()
         for code in raw_codes.split(",")
         if code.strip()
     }
-    if not codes:
+    if codes:
+        claim_filter |= Q(code__in=codes)
+
+    if customer.email:
+        claim_filter |= Q(customer__email__iexact=customer.email)
+
+    if not claim_filter:
         return
 
     Order.objects.filter(
-        code__in=codes,
+        claim_filter,
         customer__is_guest=True,
     ).update(customer=customer, updated_at=timezone.now())
 

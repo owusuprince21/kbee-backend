@@ -1,5 +1,6 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIRequestFactory
+from rest_framework.test import APIClient
 from rest_framework.throttling import UserRateThrottle
 
 from kbee.auth.firebase import HeaderUser, _merge_guest_records_by_verified_email
@@ -105,3 +106,39 @@ class FirebaseCustomerMergeTests(TestCase):
         self.assertEqual(owner.id, registered.id)
         self.assertEqual(order.customer_id, registered.id)
         self.assertEqual(payment.raw["init"]["customer_id"], registered.id)
+
+    @override_settings(ALLOW_DEBUG_AUTH_HEADERS=True)
+    def test_orders_endpoint_claims_guest_order_by_saved_code(self):
+        registered = Customer.objects.create(
+            firebase_uid="firebase:buyer",
+            email="buyer@example.com",
+            full_name="Buyer",
+            is_guest=False,
+        )
+        guest = Customer.objects.create(
+            firebase_uid="guest:phone-device",
+            guest_key="phone-device",
+            email="old-guest@example.invalid",
+            full_name="Guest customer",
+            is_guest=True,
+        )
+        order = Order.objects.create(
+            customer=guest,
+            ship_full_name="Buyer",
+            ship_line1="Accra Kingsway",
+            ship_city="Accra",
+            total="100.00",
+        )
+
+        response = APIClient().get(
+            "/api/orders/",
+            HTTP_X_FIREBASE_UID=registered.firebase_uid,
+            HTTP_X_USER_EMAIL=registered.email,
+            HTTP_X_USER_NAME=registered.full_name,
+            HTTP_X_CLAIM_ORDER_CODES=order.code,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.customer_id, registered.id)
+        self.assertEqual(response.data["results"][0]["code"], order.code)
