@@ -830,6 +830,7 @@ class CustomerMeSerializer(serializers.ModelSerializer):
         model = Customer
         fields = (
             "id",
+            "firebase_uid",
             "email",
             "full_name",
             "photo_url",
@@ -837,7 +838,7 @@ class CustomerMeSerializer(serializers.ModelSerializer):
             "bio",
             "date_joined",
         )
-        read_only_fields = ("id", "email", "photo_url", "date_joined")
+        read_only_fields = ("id", "firebase_uid", "email", "photo_url", "date_joined")
 
     def to_representation(self, instance: Customer) -> dict[str, Any]:
         data = super().to_representation(instance)
