@@ -584,6 +584,7 @@ def _initialize_hosted_checkout_from_cart(request, preferred_channel: str = "che
         raw={
             "init": {
                 "customer_id": customer.id,
+                "email": email,
                 "address_id": address_id,
                 "note": request.data.get("note") or "",
                 "shipping_fee": str(shipping_fee),
@@ -608,6 +609,7 @@ def _initialize_hosted_checkout_from_cart(request, preferred_channel: str = "che
         "metadata": {
             "payment_id": payment.id,
             "customer_id": customer.id,
+            "email": email,
             "address_id": address_id,
             "shipping_fee": str(shipping_fee),
             "shipping_town_id": getattr(shipping_town, "id", None),
@@ -758,6 +760,7 @@ class InitializeMoMoFromCartView(APIView):
             raw={
                 "init": {
                     "customer_id": customer.id,
+                    "email": email,
                     "address_id": address_id,
                     "note": request.data.get("note") or "",
                     "shipping_fee": str(shipping_fee),
@@ -782,6 +785,7 @@ class InitializeMoMoFromCartView(APIView):
             "metadata": {
                 "payment_id": payment.id,
                 "customer_id": customer.id,
+                "email": email,
                 "address_id": address_id,
                 "shipping_fee": str(shipping_fee),
                 "shipping_town_id": getattr(shipping_town, "id", None),
@@ -904,6 +908,8 @@ class InitializeCardFromCartView(APIView):
             channel="card",
             raw={
                 "init": {
+                    "customer_id": customer.id,
+                    "email": email,
                     "address_id": address_id,
                     "note": request.data.get("note") or "",
                     "shipping_fee": str(shipping_fee),
@@ -925,6 +931,7 @@ class InitializeCardFromCartView(APIView):
             "metadata": {
                 "payment_id": payment.id,
                 "customer_id": customer.id,
+                "email": email,
                 "address_id": address_id,
                 "shipping_fee": str(shipping_fee),
                 "shipping_town_id": getattr(shipping_town, "id", None),

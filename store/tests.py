@@ -142,3 +142,46 @@ class FirebaseCustomerMergeTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.customer_id, registered.id)
         self.assertEqual(response.data["results"][0]["code"], order.code)
+
+    @override_settings(ALLOW_DEBUG_AUTH_HEADERS=True)
+    def test_orders_endpoint_claims_guest_order_by_payment_email(self):
+        registered = Customer.objects.create(
+            firebase_uid="firebase:buyer",
+            email="buyer@example.com",
+            full_name="Buyer",
+            is_guest=False,
+        )
+        guest = Customer.objects.create(
+            firebase_uid="guest:phone-device",
+            guest_key="phone-device",
+            email="guest-phone-device@guest.local",
+            full_name="Guest customer",
+            is_guest=True,
+        )
+        order = Order.objects.create(
+            customer=guest,
+            ship_full_name="Buyer",
+            ship_line1="Accra Kingsway",
+            ship_city="Accra",
+            total="100.00",
+        )
+        Payment.objects.create(
+            order=order,
+            provider="paystack",
+            tx_ref="payment-email-ref",
+            status=PaymentStatus.SUCCESSFUL,
+            amount="100.00",
+            raw={"verify": {"data": {"customer": {"email": registered.email}}}},
+        )
+
+        response = APIClient().get(
+            "/api/orders/",
+            HTTP_X_FIREBASE_UID=registered.firebase_uid,
+            HTTP_X_USER_EMAIL=registered.email,
+            HTTP_X_USER_NAME=registered.full_name,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.customer_id, registered.id)
+        self.assertEqual(response.data["results"][0]["code"], order.code)

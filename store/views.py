@@ -362,6 +362,10 @@ def claim_guest_orders_from_header(request, customer: Customer) -> None:
 
     if customer.email:
         claim_filter |= Q(customer__email__iexact=customer.email)
+        claim_filter |= Q(payments__raw__init__email__iexact=customer.email)
+        claim_filter |= Q(payments__raw__verify__data__customer__email__iexact=customer.email)
+        claim_filter |= Q(payments__raw__webhook__data__customer__email__iexact=customer.email)
+        claim_filter |= Q(payments__raw__init_gateway__data__customer__email__iexact=customer.email)
 
     if not claim_filter:
         return
