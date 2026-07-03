@@ -327,6 +327,24 @@ def get_or_create_customer(request) -> Customer:
     return customer
 
 
+def get_registered_customer(request) -> Customer:
+    try:
+        customer = customer_from_verified_claims(request)
+    except AuthenticationFailed as exc:
+        if request_has_firebase_auth_material(request):
+            raise exc
+        customer = None
+    if customer and not customer.is_guest:
+        remember_customer_session(request, customer)
+        return customer
+
+    customer = customer_from_session(request)
+    if customer and not customer.is_guest:
+        return customer
+
+    raise PermissionDenied("Sign in is required for this request.")
+
+
 def get_active_cart(customer: Customer) -> Cart:
     carts = list(
         Cart.objects
@@ -643,7 +661,7 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return Order.objects.none()
-        customer = get_or_create_customer(self.request)
+        customer = get_registered_customer(self.request)
         return Order.objects.filter(customer=customer).prefetch_related("items", "items__product")
 
     def get_object(self):
