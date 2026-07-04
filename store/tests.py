@@ -4,7 +4,19 @@ from rest_framework.test import APIClient
 from rest_framework.throttling import UserRateThrottle
 
 from kbee.auth.firebase import HeaderUser, _merge_guest_records_by_verified_email
-from store.models import AccountDetail, Address, Cart, Customer, Order, Payment, PaymentStatus
+from store.models import (
+    AccountDetail,
+    Address,
+    Cart,
+    Category,
+    Customer,
+    MainCategory,
+    Order,
+    Payment,
+    PaymentStatus,
+    Product,
+    WishlistItem,
+)
 from store.views_checkout import _claim_guest_payment_for_registered_customer
 
 
@@ -195,3 +207,34 @@ class GuestReadTests(TestCase):
         self.assertEqual(response.data["items"], [])
         self.assertEqual(response.data["subtotal"], "0.00")
         self.assertFalse(Customer.objects.filter(is_guest=True).exists())
+
+    def test_guest_can_add_read_and_remove_wishlist_item(self):
+        category = Category.objects.create(name=MainCategory.LAPTOPS, slug="laptops")
+        product = Product.objects.create(
+            name="Guest Laptop",
+            slug="guest-laptop",
+            category=category,
+            price="2500.00",
+            stock_quantity=3,
+            main_image="products/guest-laptop.jpg",
+        )
+        client = APIClient()
+        guest_headers = {"HTTP_X_GUEST_ID": "guest-browser-wishlist"}
+
+        create_response = client.post(
+            "/api/wishlist/",
+            {"product_id": product.id},
+            format="json",
+            **guest_headers,
+        )
+        self.assertEqual(create_response.status_code, 201)
+        guest = Customer.objects.get(guest_key="guest-browser-wishlist", is_guest=True)
+        self.assertTrue(WishlistItem.objects.filter(customer=guest, product=product).exists())
+
+        list_response = client.get("/api/wishlist/", **guest_headers)
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.data["results"][0]["product"]["id"], product.id)
+
+        delete_response = client.delete(f"/api/wishlist/by-product/{product.id}/", **guest_headers)
+        self.assertEqual(delete_response.status_code, 204)
+        self.assertFalse(WishlistItem.objects.filter(customer=guest, product=product).exists())
